@@ -1,6 +1,10 @@
+# Before Refactor
+
 import time
 import RPi.GPIO as gpio
 import SimpleCV
+
+stagnantStartTime = None # Keeps track of how long the car is standing still
 
 def init():
 	gpio.setmode(gpio.BOARD)
@@ -96,60 +100,102 @@ def getDistance():
 	
 	return (stop - start) * 17000
 
-def rotate(circleOffset):
+def rotate(circleOffset,f):
+	global stagnantStartTime
+	
 	inRange = circleInRange(circleOffset)
+
 	if not(inRange):
 		if circleOffset > 0:
 			turningRight = True
 			turningLeft = False
+			start = time.time()
 			pivotRight()
 		elif circleOffset < 0:
 			turningRight = False
 			turningLeft = True
+			start = time.time()
 			pivotLeft()
 		while True:	
 			currentCircleOffset = getOffset(cam)
-			if circleFound(currentCircleOffset, turningRight, turningLeft):				
+			if circleFound(currentCircleOffset, turningRight, turningLeft):	
+				end = time.time()
+				if stagnantStartTime is not(None):
+					f.write('S:' + str(end - stagnantStartTime) + '\n')
+					stagnantStartTime = None
+				if turningRight:
+					f.write('R:' + str(end - start) + '\n')
+				elif turningLeft:
+					f.write('L:' + str(end - start) + '\n')			
 				resetTurning()				
 				break
-
+	else:
+		if stagnantStartTime is None:
+			stagnantStartTime = time.time()	
 def resetTurning():
 	turningRight = False
 	turningLeft = False
 	stop()
 
-def correctDistance():
+def correctDistance(f):
+	global stagnantStartTime
+
+	direction = 'stopped'
+	start = None
 	while True:
 		distance = getDistance()
 
 		if distance >= MAX_RANGE:
+			direction = 'forward'
+			if start is None:
+				start = time.time()
 			forward()
 		elif distance <= MIN_RANGE:
+			direction = 'reverse'
+			if start is None:
+				start = time.time()
 			reverse()
 		else:
+			end = time.time()
+			if direction is 'stopped':
+				if stagnantStartTime is None:
+					stagnantStartTime = time.time()
+			elif direction is 'forward':
+				if stagnantStartTime is not(None):
+					f.write('S:' + str(end - stagnantStartTime) + '\n')
+					stagnantStartTime = None
+				f.write('F:' + str(end - start) + '\n')
+			elif direction is 'reverse':
+				if stagnantStartTime is not(None):
+					f.write('S:' + str(end - stagnantStartTime) + '\n')
+					stagnantStartTime = None
+				f.write('B:' + str(end - start) + '\n')
 			stop()
 			break
 
-MAX_RANGE = 20
-MIN_RANGE = 15
-TRIG = 12
-ECHO = 16
-
-cam = SimpleCV.Camera()
-init()
-
 try:
+	MAX_RANGE = 20
+	MIN_RANGE = 15
+	TRIG = 12
+	ECHO = 16
+
+	cam = SimpleCV.Camera()
+	init()
+
+	f = open('replay.txt', 'w')
 	while True:
 		circleOffset = None
 
 		while circleOffset is None:
 			circleOffset = getOffset(cam)
 
-		rotate(circleOffset)
-		correctDistance()
+		rotate(circleOffset, f)
+		correctDistance(f)
 except KeyboardInterrupt:
 	print("CTRL-C detected, exiting program")
 finally:
+	f.write('END\n')
+	f.close()
 	print("gpio.cleanup()")
 	gpio.cleanup()
 
