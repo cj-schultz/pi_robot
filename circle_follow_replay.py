@@ -1,71 +1,17 @@
-# Before Refactor
-
 import time
 import RPi.GPIO as gpio
 import SimpleCV
+import piModules
+import motors
 
-stagnantStartTime = None # Keeps track of how long the car is standing still
-
-def init():
-	gpio.setmode(gpio.BOARD)
-	gpio.setup(7, gpio. OUT)
-	gpio.setup(11, gpio.OUT)
-	gpio.setup(13, gpio.OUT)
-	gpio.setup(15, gpio.OUT)
-
-	gpio.output(7, True)
-	gpio.output(11, True)
-	gpio.output(13, True)
-	gpio.output(15, True)
-
-def pivotLeft():
-	gpio.output(7, True)
-	gpio.output(11, False)
-	gpio.output(13, True)
-	gpio.output(15, False)
-
-def pivotRight():
-	gpio.output(7, False)
-	gpio.output(11, True)
-	gpio.output(13, False)
-	gpio.output(15, True)
-
-def forward():
-	gpio.output(7, True) # Right, Reverse
-	gpio.output(11, False) # Right, Forward
-	gpio.output(13, False) # Left, Forward
-	gpio.output(15, True) # Left, Reverse
-
-def reverse():
-	gpio.output(7, False)
-	gpio.output(11, True)
-	gpio.output(13, True)
-	gpio.output(15, False)
-
-def stop():
-	gpio.output(7, True)
-	gpio.output(11, True)
-	gpio.output(13, True)
-	gpio.output(15, True)
-
-def getOffset(cam):
-	img = cam.getImage().flipHorizontal()
-	
-	dist = img.colorDistance(SimpleCV.Color.BLACK).dilate(2)
-	segmented = dist.stretch(50, 255)
-	blobs = segmented.findBlobs()
-
-	if blobs:
-		circles = blobs.filter([b.isCircle(1) for b in blobs])
-		if circles:
-			return circles[-1].x - img.width/2	
-
+# Returns True if the circle is in range of the center of the cameras view
 def circleInRange(offset):
-	if offset >= -7 and offset <= 7:
+	if offset >= -7 and offset <= 7: # 7 inch range on either side before rotation is triggered
 		return True
 	else:
 		return False
 
+# Returns true if the circle has been found while turning (which means the robot should stop)
 def circleFound(offset, turningRight, turningLeft):
 	if turningRight and offset > 0 and offset < 14:
 		return True
@@ -74,51 +20,31 @@ def circleFound(offset, turningRight, turningLeft):
 	else:
 		return False
 
-def getDistance():
-	gpio.setup(TRIG, gpio.OUT)
-	gpio.output(TRIG, 0)
-	
-	gpio.setup(ECHO, gpio.IN)
-	
-	time.sleep(0.1)
-
-	gpio.output(TRIG, 1)
-	time.sleep(0.00001)
-	gpio.output(TRIG, 0)
-
-	while gpio.input(ECHO) == 0:
-		pass
-	start = time.time()
-
-	while gpio.input(ECHO) == 0:
-		pass
-	start = time.time()
-
-	while gpio.input(ECHO) == 1:
-		pass
-	stop = time.time()
-	
-	return (stop - start) * 17000
-
+# Rotates depending on the circles position
 def rotate(circleOffset,f):
-	global stagnantStartTime
+	global stagnantStartTime 
 	
 	inRange = circleInRange(circleOffset)
 
+	# If the circle is out of the 7 inch range
 	if not(inRange):
+		# If circle is offset to the right
 		if circleOffset > 0:
 			turningRight = True
 			turningLeft = False
 			start = time.time()
-			pivotRight()
+			motors.pivotRight()
+		# If circle is offset to the left
 		elif circleOffset < 0:
 			turningRight = False
 			turningLeft = True
 			start = time.time()
-			pivotLeft()
+			motors.pivotLeft()
+
+		# Robot rotates until this loop is exited
 		while True:	
-			currentCircleOffset = getOffset(cam)
-			if circleFound(currentCircleOffset, turningRight, turningLeft):	
+			currentCircleOffset = piModules.getOffset(cam)
+			if circleFound(currentCircleOffset, turningRight, turningLeft):	# Circle found, stop turning, write movements to file
 				end = time.time()
 				if stagnantStartTime is not(None):
 					f.write('S:' + str(end - stagnantStartTime) + '\n')
@@ -132,30 +58,35 @@ def rotate(circleOffset,f):
 	else:
 		if stagnantStartTime is None:
 			stagnantStartTime = time.time()	
+
+# Stops the robot when circleFound
 def resetTurning():
 	turningRight = False
 	turningLeft = False
-	stop()
+	motors.stop()
 
+# Handles forward/backward movement
 def correctDistance(f):
 	global stagnantStartTime
 
 	direction = 'stopped'
 	start = None
-	while True:
-		distance = getDistance()
 
-		if distance >= MAX_RANGE:
+	# Loops until the robot is between MIN_RANGE and MAX_RANGE
+	while True:
+		distance = piModules.getDistance() # Gets distance between cardboard and robot
+
+		if distance >= MAX_RANGE: # Forward
 			direction = 'forward'
 			if start is None:
 				start = time.time()
-			forward()
-		elif distance <= MIN_RANGE:
+			motors.forward()
+		elif distance <= MIN_RANGE: # Reverse
 			direction = 'reverse'
 			if start is None:
 				start = time.time()
-			reverse()
-		else:
+			motors.reverse()
+		else: # Robot is in "steady" range, write movement to file
 			end = time.time()
 			if direction is 'stopped':
 				if stagnantStartTime is None:
@@ -170,33 +101,35 @@ def correctDistance(f):
 					f.write('S:' + str(end - stagnantStartTime) + '\n')
 					stagnantStartTime = None
 				f.write('B:' + str(end - start) + '\n')
-			stop()
+			motors.stop()
 			break
-
 try:
-	MAX_RANGE = 20
-	MIN_RANGE = 15
-	TRIG = 12
-	ECHO = 16
+	MAX_RANGE = 20 # Max distance between cardboard and robot
+	MIN_RANGE = 15 # Min distance between cardboard and robot
 
+	stagnantStartTime = None # Keeps track of pauses in the robot's movement
+	
 	cam = SimpleCV.Camera()
-	init()
+        motors.init()
 
-	f = open('replay.txt', 'w')
+	f = open('replay.txt', 'w') # Create file for the replay
+
+	# Main Loop
 	while True:
 		circleOffset = None
 
+		# Loops until the circle is found
 		while circleOffset is None:
-			circleOffset = getOffset(cam)
+			circleOffset = piModules.getOffset(cam)
 
-		rotate(circleOffset, f)
-		correctDistance(f)
+		rotate(circleOffset, f) # Rotate
+		correctDistance(f) # Forward Backward
 except KeyboardInterrupt:
 	print("CTRL-C detected, exiting program")
 finally:
-	f.write('END\n')
+	f.write('END\n') # Write END on the file
 	f.close()
 	print("gpio.cleanup()")
-	gpio.cleanup()
+	gpio.cleanup() # Cleanup GPIO pins
 
 
